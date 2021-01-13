@@ -1,27 +1,23 @@
 
-import tensorflow as tf
 from tensorflow.keras.layers import Conv1D, GlobalAveragePooling1D, AveragePooling1D, Flatten, Dense, BatchNormalization
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.callbacks import EarlyStopping
 
 import numpy as np
-from data import get_record_names, read, process_fhr, NB_VALUES
+from data import build_dataset, build_evaluation_dataset, sample, PH_LIMIT
 import matplotlib.pyplot as plt
 
-# FHR
-# CU
-# Terme (41 semaines par ex.)
-# --> Prédire le pH, apgar
-# Pour commencer les 15 (30?) dernières minutes, mais pas plus d'une heure
-# ph>=7.15
 
 
-def build_model():
+###
+# Models
+###
+
+def build_model(nb_values):
 
     model = Sequential()
 
-    model.add(BatchNormalization(input_shape=(NB_VALUES, 1)))
-    model.add(Conv1D(filters=32, kernel_size=5, strides=1, input_shape=(NB_VALUES, 1)))
+    model.add(BatchNormalization(input_shape=(nb_values, 1)))
+    model.add(Conv1D(filters=32, kernel_size=5, strides=1, input_shape=(nb_values, 1)))
     model.add(AveragePooling1D(pool_size=5))
 
     model.add(BatchNormalization())
@@ -43,20 +39,20 @@ def build_model():
     return model
 
 
-def build_model_2():
+def build_model_2(nb_values):
 
     model = Sequential()
 
-    model.add(BatchNormalization(input_shape=(NB_VALUES, 1)))
+    model.add(BatchNormalization(input_shape=(nb_values, 1)))
     model.add(Conv1D(filters=64, kernel_size=5, padding='same'))
     model.add(AveragePooling1D(pool_size=5))
 
-    model.add(BatchNormalization(input_shape=(NB_VALUES, 1)))
-    model.add(Conv1D(filters=32, kernel_size=5, padding='same'))
+    model.add(BatchNormalization(input_shape=(nb_values, 1)))
+    model.add(Conv1D(filters=128, kernel_size=5, padding='same'))
     model.add(AveragePooling1D(pool_size=5))
 
     model.add(BatchNormalization())
-    model.add(Conv1D(filters=16, kernel_size=5, padding='same', input_shape=(NB_VALUES, 1)))
+    model.add(Conv1D(filters=128, kernel_size=5, padding='same', input_shape=(nb_values, 1)))
     model.add(AveragePooling1D(pool_size=8))
 
     model.add(Flatten())
@@ -70,33 +66,46 @@ def build_model_2():
     return model
 
 
+
+###
+# Model estimation and evaluation
+###
+
+nb_values_total, nb_values_part = 4 * 60 * 90, 4 * 60 * 20
+nb_samples = 10000
+
 # Build dataset
-records = get_record_names()
-data = [read(r) for r in records]
+dataset = build_dataset(nb_values_total, nb_values_part)
+d_train_0, d_train_1, d_test_0, d_test_1 = sample(dataset, nb_samples, nb_values_part)
 
-fhr = [process_fhr(i[0]) for i in data]
-hypoxia = np.array([i[2]<7.15 for i in data])
+X_train = np.concatenate((d_train_0[0], d_train_1[0]))
+X_test = np.concatenate((d_test_0[0], d_test_1[0]))
+Y_train = np.concatenate((d_train_0[1], d_train_1[1]))
+Y_test = np.concatenate((d_test_0[1], d_test_1[1]))
 
-X = np.stack([np.expand_dims(f, 1) for f in fhr if f is not None])
-Y = np.array([1 if h else 0 for f, h in zip(fhr, hypoxia) if f is not None])
+# Model estimation
+model = build_model_2(nb_values_part)
+model.fit(X_train, Y_train, batch_size=16, epochs=50, validation_data=(X_test, Y_test), shuffle=True)
 
-nb_train = 450
-X_train, X_test = X[:nb_train], X[nb_train:]
-Y_train, Y_test = Y[:nb_train], Y[nb_train:]
+# Evaluation
+df_train, df_test = build_evaluation_dataset(nb_values_total, nb_values_part)
 
-model = build_model_2()
-model.fit(X_train, Y_train, batch_size=16, epochs=500, validation_data=(X_test, Y_test))
+x_train, y_train = np.expand_dims(np.stack(df_train.fhr.values), 2), np.where(df_train.ph>=PH_LIMIT, 0, 1)
+x_test, y_test= np.expand_dims(np.stack(df_test.fhr.values), 2), np.where(df_test.ph>=PH_LIMIT, 0, 1)
+y_pred_train = model.predict(x_train).reshape(-1)
+y_pred_test = model.predict(x_test).reshape(-1)
+
+print((np.where(y_pred_train>=0.5, 1, 0)==y_train).sum() / len(y_train))
+print((np.where(y_pred_test>=0.5, 1, 0)==y_test).sum() / len(y_test))
 
 
+##############
 
 Y_train_pred = model.predict(X_train).reshape(-1)
 indices = np.argsort(Y_train_pred)
 plt.scatter(range(len(indices)), Y_train_pred[indices])
 plt.scatter(range(len(indices)), Y_train[indices])
 plt.show()
-
-
-
 
 Y_test_pred = model.predict(X_test).reshape(-1)
 indices = np.argsort(Y_test_pred)
